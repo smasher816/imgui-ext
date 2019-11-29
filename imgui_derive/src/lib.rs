@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, Ident};
+use syn::{parse_macro_input, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Data, DeriveInput, Fields, Ident, Variant};
 
 use error::Error;
 
@@ -30,6 +30,7 @@ fn impl_derive(input: &DeriveInput) -> Result<TokenStream, Error> {
 
     let (body, catch_fields, catch_methods) = match input.data {
         Data::Struct(ref body) => struct_body(body.fields.clone()),
+        Data::Enum(ref body) => enum_body(body.variants.clone()),
         _ => Err(Error::non_struct(input.span())),
     }?;
 
@@ -142,6 +143,84 @@ fn struct_body(fields: Fields) -> Result<(TokenStream, TokenStream, TokenStream)
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
+
+    Ok((quote! { #( #field_body );*}, input_fields, input_methods))
+}
+
+fn enum_body(variants: Punctuated<Variant, Comma>) -> Result<(TokenStream, TokenStream, TokenStream), Error> {
+    let mut input_fields: TokenStream = TokenStream::new();
+    let mut input_methods: TokenStream = TokenStream::new();
+    let mut input_fields_set = HashSet::new();
+
+
+    let field_body = variants
+        .iter()
+        .enumerate()
+        .flat_map(|(_, variant)| {
+            let ident = &variant.ident;
+
+            let field = variant.fields.iter().next().expect("No field");
+            let ty = &field.ty;
+
+            //let attr = variant.attrs.get(0).expect("No attr");
+            //let tag = parser::Tag::None;
+
+            // collect all the imgui attributes
+            // we need to check that there is only one.
+            let attrs: Vec<Attribute> = variant
+                .attrs
+                .iter()
+                .filter(|attr| {
+                    let ident = Ident::new("imgui", attr.span());
+                    attr.path.is_ident(&ident)
+                })
+                .cloned()
+                .collect();
+
+            let mut attrs = attrs.into_iter();
+            let first = attrs.next();
+            let second = attrs.next();
+
+            match (first, second) {
+                // No annotations were found.
+                // Emmit no sourcecode.
+                (None, None) => vec![Ok(TokenStream::new())],
+
+                // There is more than one imgui annotation.
+                // Raise a descriptive error pointing to the extra annotation.
+                (Some(_), Some(err)) => vec![Err(Error::multiple(err.span()))],
+
+                // There is a single annotation, as it should.
+                // Parse the annotation and emmit the source code for this field
+                (Some(attr), None) => {
+                    let tags = attr
+                        .parse_meta() // -> Meta
+                        .map_err(|_| Error::new(ErrorKind::ParseError, attr.span()))
+                        .and_then(parser::parse_meta); // -> Result<Vec<Tag>>
+
+                    match tags {
+                        Err(error) => vec![Err(error)],
+                        Ok(tags) => tags
+                            .into_iter()
+                            .map(|tag| {
+                                parser::emmit_tag_tokens(
+                                    ident,
+                                    ty,
+                                    &attr,
+                                    &tag,
+                                    &mut input_fields,
+                                    &mut input_methods,
+                                    &mut input_fields_set,
+                                )
+                            })
+                            .collect(),
+                    }
+                }
+
+                _ => unreachable!(),
+            }
+    })
+    .collect::<Result<Vec<_>, Error>>()?;
 
     Ok((quote! { #( #field_body );*}, input_fields, input_methods))
 }
